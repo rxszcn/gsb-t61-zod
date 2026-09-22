@@ -3326,6 +3326,10 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
       payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
       // An enumerable key schema declares which keys the record owns, so a key outside the set is unrecognized. A non-enumerable one (regex, refine) is a constraint every key must satisfy, so a failing key is invalid. Only the former is reconcilable against the other side of an intersection.
       let unrecognized!: string[];
+      // no collision check until some key normalizes: before that every write uses its own input key, and input keys are unique
+      let sawNormalized = false;
+      // outKeys whose writes are deferred to async continuations, so the synchronous collision check below sees them too
+      let pendingKeys: Set<PropertyKey> | undefined;
       // Reflect.ownKeys for Symbol-key support; filter non-enumerable to match z.object()
       for (const key of Reflect.ownKeys(input)) {
         if (key === "__proto__") continue;
@@ -3372,9 +3376,39 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
         const outKey = keyResult.value as PropertyKey;
         if (outKey === "__proto__") continue;
 
+        // two distinct input keys can normalize to the same output key ("1" and "01" both become 1 under z.number()), so refuse the second write instead of silently dropping the first value
+        if (outKey !== key) sawNormalized = true;
+        if (
+          sawNormalized &&
+          (Object.prototype.hasOwnProperty.call(payload.value, outKey) || pendingKeys?.has(outKey))
+        ) {
+          payload.issues.push({
+            code: "invalid_key",
+            origin: "record",
+            issues: [
+              util.finalizeIssue(
+                {
+                  code: "custom",
+                  message: `key "${String(key)}" collides with an earlier key that normalizes to the same output key`,
+                  input: key,
+                  path: [],
+                },
+                ctx,
+                core.config()
+              ),
+            ],
+            input: key,
+            path: [key],
+            inst,
+          });
+          continue;
+        }
+
         const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
 
         if (result instanceof Promise) {
+          pendingKeys ??= new Set();
+          pendingKeys.add(outKey);
           proms.push(
             result.then((result) => {
               if (result.issues.length) {

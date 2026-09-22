@@ -2011,8 +2011,11 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
     const keyFast = addConstant(ctx, keyFn);
     const numericConst = addConstant(ctx, regexes.number);
     const outKeyVar = newVar(ctx);
+    const sawNormalizedVar = newVar(ctx);
+    const hasOwnConst = addConstant(ctx, Object.prototype.hasOwnProperty);
 
     // the body runs once per string key and once per symbol key, since a key schema can accept symbols
+    doc.write(`let ${sawNormalizedVar} = false;`);
     emitOwnKeys(doc, ctx, accessor, kVar, (d) => {
       d.write(`let ${outKeyVar} = ${keyFast}(${kVar});`);
       // Numeric-string retry, mirroring the runtime: a key the schema rejects as a string is tried again as a number, so z.record(z.number(), …) matches the numeric keys JavaScript stringified on the way in.
@@ -2027,6 +2030,9 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
       }
       // The guard above tested the input key, but the schema can normalize an ordinary key into __proto__; re-check the one actually written under.
       d.write(`if (${outKeyVar} === "__proto__") continue;`);
+      // Two distinct input keys can normalize to one output key ("1" and "01" under z.number()); mirroring the runtime, reject rather than silently drop the first value. No check is needed until some key normalizes, since identity writes use unique input keys.
+      d.write(`if (${outKeyVar} !== ${kVar}) ${sawNormalizedVar} = true;`);
+      d.write(`if (${sawNormalizedVar} && ${hasOwnConst}.call(${outputVar}, ${outKeyVar})) return INVALID;`);
       // Read once: the raw expression would be evaluated again by the output write below, so an accessor could return an unvalidated second value.
       const valueVar = newVar(ctx);
       d.write(`const ${valueVar} = ${accessor}[${kVar}];`);

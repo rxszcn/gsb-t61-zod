@@ -788,6 +788,58 @@ test("numeric string keys", () => {
   expect(transformedSchema.parse({ 5: "five", 10: "ten" })).toEqual({ 10: "five", 20: "ten" });
 });
 
+test("distinct input keys that normalize to the same output key are rejected", () => {
+  const schema = z.record(z.number(), z.string());
+
+  // two different spellings of one numeric key must not silently merge into a single output entry
+  expect(schema.safeParse({ "1": "x", "01": "y" })).toMatchInlineSnapshot(`
+    {
+      "error": [ZodError: [
+      {
+        "code": "invalid_key",
+        "origin": "record",
+        "issues": [
+          {
+            "code": "custom",
+            "message": "key \\"01\\" collides with an earlier key that normalizes to the same output key",
+            "path": []
+          }
+        ],
+        "path": [
+          "01"
+        ],
+        "message": "Invalid key in record"
+      }
+    ]],
+      "success": false,
+    }
+  `);
+  expect(schema.safeParse({ "1": "x", "1.0": "y" }).success).toBe(false);
+  expect(schema.safeParse({ "0": "a", "-0": "b" }).success).toBe(false);
+
+  // a single non-canonical key still canonicalizes, and distinct keys are unaffected
+  expect(schema.parse({ "01": "y" })).toEqual({ 1: "y" });
+  expect(schema.parse({ "1": "x", "2": "y" })).toEqual({ 1: "x", 2: "y" });
+
+  // the same guard covers key schemas that normalize via transform
+  const upper = z.record(z.string().toUpperCase(), z.number());
+  expect(upper.safeParse({ a: 1, A: 2 }).success).toBe(false);
+  expect(upper.parse({ a: 1, b: 2 })).toEqual({ A: 1, B: 2 });
+});
+
+test("key collision is detected when value writes are deferred", async () => {
+  const schema = z.record(
+    z.number(),
+    z.string().refine(async () => true)
+  );
+  const result = await schema.safeParseAsync({ "1": "x", "01": "y" });
+  expect(result.success).toBe(false);
+  if (!result.success) {
+    expect(result.error.issues[0]!.code).toBe("invalid_key");
+    expect(result.error.issues[0]!.path).toEqual(["01"]);
+  }
+});
+
 test("v3-compat single-arg form: z.record(valueType)", () => {
   // single arg should default keyType to z.string() and use the arg as valueType
   const schema = (z.record as any)(z.number());
