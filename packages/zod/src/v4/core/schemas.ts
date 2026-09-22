@@ -3231,6 +3231,38 @@ export interface $ZodRecord<Key extends $ZodRecordKey = $ZodRecordKey, Value ext
   _zod: $ZodRecordInternals<Key, Value>;
 }
 
+// Two distinct input keys can normalize to the same output key (numeric retry, key transforms); the later key is a collision error, never a silent overwrite of the first.
+function recordKeyCollisionIssue(
+  inst: $ZodRecord,
+  ctx: ParseContextInternal | undefined,
+  key: PropertyKey,
+  firstKey: PropertyKey,
+  outKey: PropertyKey
+): errors.$ZodRawIssue {
+  return {
+    code: "invalid_key",
+    origin: "record",
+    issues: [
+      util.finalizeIssue(
+        {
+          code: "custom",
+          message: `Record keys ${util.stringifyPrimitive(firstKey)} and ${util.stringifyPrimitive(key)} both map to key ${util.stringifyPrimitive(outKey)}`,
+          input: key,
+        },
+        ctx,
+        core.config()
+      ),
+    ],
+    input: key,
+    path: [key],
+    inst,
+  };
+}
+
+// the object slot an output key lands in: strings and symbols are their own slot, everything else stringifies (property-key semantics)
+const recordKeySlot = (key: PropertyKey): PropertyKey =>
+  typeof key === "string" || typeof key === "symbol" ? key : String(key);
+
 export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$constructor("$ZodRecord", (inst, def) => {
   $ZodType.init(inst, def);
   const memo = core.globalConfig.memoizer;
@@ -3326,6 +3358,8 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
       payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
       // An enumerable key schema declares which keys the record owns, so a key outside the set is unrecognized. A non-enumerable one (regex, refine) is a constraint every key must satisfy, so a failing key is invalid. Only the former is reconcilable against the other side of an intersection.
       let unrecognized!: string[];
+      // Output keys already written, mapped back to the input key that produced them, so a second input key normalizing to the same slot is a collision error rather than a silent overwrite. Lazy: a write that lands on its own input key (a numeric outKey that stringifies back to the input key writes the same slot) can only collide with a normalizing write, so plain string and canonical numeric keys allocate nothing.
+      let writtenKeys: Map<PropertyKey, PropertyKey> | undefined;
       // Reflect.ownKeys for Symbol-key support; filter non-enumerable to match z.object()
       for (const key of Reflect.ownKeys(input)) {
         if (key === "__proto__") continue;
@@ -3349,6 +3383,13 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
 
         if (keyResult.issues.length) {
           if (def.mode === "loose") {
+            if (writtenKeys) {
+              if (writtenKeys.has(key)) {
+                payload.issues.push(recordKeyCollisionIssue(inst, ctx, key, writtenKeys.get(key)!, key));
+                continue;
+              }
+              writtenKeys.set(key, key);
+            }
             // Pass through unchanged
             payload.value[key] = input[key];
           } else if (values) {
@@ -3372,9 +3413,33 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
         const outKey = keyResult.value as PropertyKey;
         if (outKey === "__proto__") continue;
 
+        // checked before the value parse so a dropped key is never validated
+        if (writtenKeys) {
+          const slot = recordKeySlot(outKey);
+          if (writtenKeys.has(slot)) {
+            payload.issues.push(recordKeyCollisionIssue(inst, ctx, key, writtenKeys.get(slot)!, outKey));
+            continue;
+          }
+          writtenKeys.set(slot, key);
+        } else if (outKey !== key && (typeof outKey !== "number" || String(outKey) !== key)) {
+          // first normalizing key: every write so far landed on its own input key (a numeric outKey that stringifies back to the input key writes the same slot, so it counts as identity too), so the output object itself is the seed
+          writtenKeys = new Map<PropertyKey, PropertyKey>(Reflect.ownKeys(payload.value).map((k) => [k, k]));
+          const slot = recordKeySlot(outKey);
+          if (writtenKeys.has(slot)) {
+            payload.issues.push(recordKeyCollisionIssue(inst, ctx, key, writtenKeys.get(slot)!, outKey));
+            continue;
+          }
+          writtenKeys.set(slot, key);
+        }
+
         const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
 
         if (result instanceof Promise) {
+          if (!writtenKeys) {
+            // async writes land after this loop, so the map has to exist from the first scheduled write on
+            writtenKeys = new Map<PropertyKey, PropertyKey>(Reflect.ownKeys(payload.value).map((k) => [k, k]));
+            writtenKeys.set(recordKeySlot(outKey), key);
+          }
           proms.push(
             result.then((result) => {
               if (result.issues.length) {

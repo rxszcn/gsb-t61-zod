@@ -2011,6 +2011,12 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
     const keyFast = addConstant(ctx, keyFn);
     const numericConst = addConstant(ctx, regexes.number);
     const outKeyVar = newVar(ctx);
+    const slotVar = newVar(ctx);
+    const writtenVar = newVar(ctx);
+    const hasOwnConst = addConstant(ctx, Object.prototype.hasOwnProperty);
+
+    // Output-key collision tracking, mirroring the runtime: two input keys that normalize to the same output key (numeric retry, key transforms) reject rather than silently overwrite. Lazily created — a write that lands on its own input key (including a canonical numeric key, whose number stringifies back to it) can only collide with a normalizing write, so plain string and canonical numeric keys allocate nothing.
+    doc.write(`let ${writtenVar};`);
 
     // the body runs once per string key and once per symbol key, since a key schema can accept symbols
     emitOwnKeys(doc, ctx, accessor, kVar, (d) => {
@@ -2021,12 +2027,17 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
       );
       if (isLoose) {
         // A loose record keeps a key its schema rejects, copying the value across unvalidated rather than failing the parse.
-        d.write(`if (${outKeyVar} === INVALID) { ${outputVar}[${kVar}] = ${accessor}[${kVar}]; continue; }`);
+        d.write(
+          `if (${outKeyVar} === INVALID) { if (${writtenVar} !== undefined) { if (${writtenVar}.has(${kVar})) return INVALID; ${writtenVar}.add(${kVar}); } ${outputVar}[${kVar}] = ${accessor}[${kVar}]; continue; }`
+        );
       } else {
         d.write(`if (${outKeyVar} === INVALID) return INVALID;`);
       }
       // The guard above tested the input key, but the schema can normalize an ordinary key into __proto__; re-check the one actually written under.
       d.write(`if (${outKeyVar} === "__proto__") continue;`);
+      d.write(
+        `if (${writtenVar} !== undefined) { const ${slotVar} = typeof ${outKeyVar} === "string" || typeof ${outKeyVar} === "symbol" ? ${outKeyVar} : String(${outKeyVar}); if (${writtenVar}.has(${slotVar})) return INVALID; ${writtenVar}.add(${slotVar}); } else if (${outKeyVar} !== ${kVar} && (typeof ${outKeyVar} !== "number" || String(${outKeyVar}) !== ${kVar})) { if (${hasOwnConst}.call(${outputVar}, ${outKeyVar})) return INVALID; ${writtenVar} = new Set(Reflect.ownKeys(${outputVar})); ${writtenVar}.add(typeof ${outKeyVar} === "string" || typeof ${outKeyVar} === "symbol" ? ${outKeyVar} : String(${outKeyVar})); }`
+      );
       // Read once: the raw expression would be evaluated again by the output write below, so an accessor could return an unvalidated second value.
       const valueVar = newVar(ctx);
       d.write(`const ${valueVar} = ${accessor}[${kVar}];`);

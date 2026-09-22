@@ -400,6 +400,22 @@ test("record dynamic key", () => {
   differential(z.record(z.string(), z.number()), [{}, { a: 1, b: 2 }, { a: "x" }]);
 });
 
+test("record numeric key collisions", () => {
+  differential(z.record(z.number(), z.string()), [
+    { 1: "a", 2: "b" },
+    { "1": "x", "01": "y" },
+    { "1": "x", "1.0": "y" },
+    { "0": "a", "-0": "b" },
+  ]);
+  differential(
+    z.record(
+      z.string().overwrite((s) => s.toUpperCase()),
+      z.number()
+    ),
+    [{ ab: 1 }, { ab: 1, AB: 2 }]
+  );
+});
+
 test("record dynamic key rejects enumerable symbol keys", () => {
   const key = Symbol("record-key");
   const input = { a: 1, [key]: 2 };

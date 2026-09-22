@@ -1548,7 +1548,10 @@ test("record key schemas compile: formats, checks, numbers, transforms", () => {
     [z.record(z.string().min(2), z.number()), [{ ab: 1 }, { a: 1 }]],
     [z.record(z.string().regex(/^k_/), z.number()), [{ k_a: 1 }, { x: 1 }]],
     // Numeric keys arrive stringified; the runtime retries them as numbers.
-    [z.record(z.number(), z.string()), [{ 1: "a" }, { "1.5": "a" }, { x: "a" }]],
+    [
+      z.record(z.number(), z.string()),
+      [{ 1: "a" }, { "1.5": "a" }, { x: "a" }, { "1": "a", "01": "b" }, { "0": "a", "-0": "b" }],
+    ],
     [z.record(z.templateLiteral(["id_", z.string()]), z.number()), [{ id_a: 1 }, { b: 1 }]],
     // The key schema picks the output key, not the input key.
     [
@@ -1559,7 +1562,7 @@ test("record key schemas compile: formats, checks, numbers, transforms", () => {
           .overwrite((s: string) => s.toUpperCase()),
         z.number()
       ),
-      [{ ab: 1 }, { "": 1 }],
+      [{ ab: 1 }, { "": 1 }, { ab: 1, AB: 2 }],
     ],
   ] as [z.ZodType, unknown[]][]) {
     for (const input of inputs) expectMatch(schema, input);
@@ -1575,6 +1578,9 @@ test("record key schemas compile: formats, checks, numbers, transforms", () => {
   for (const input of [{ "a@b.com": 1 }, { nope: 1 }, { "a@b.com": 1, nope: "raw" }, { "a@b.com": "bad" }]) {
     expectMatch(z.looseRecord(z.email(), z.number()), input);
   }
+
+  // A key collision is a rejection in both modes, never a silent merge.
+  expectMatch(z.looseRecord(z.number(), z.string()), { "1": "x", "01": "y" });
 });
 
 test("date min/max bounds compile with runtime parity", () => {

@@ -788,6 +788,56 @@ test("numeric string keys", () => {
   expect(transformedSchema.parse({ 5: "five", 10: "ten" })).toEqual({ 10: "five", 20: "ten" });
 });
 
+test("numeric key collisions are an error, never a silent merge", () => {
+  const schema = z.record(z.number(), z.string());
+
+  // distinct input keys that normalize to the same output key must not collapse into one entry
+  for (const input of [
+    { "1": "x", "01": "y" },
+    { "1": "x", "1.0": "y" },
+    { "0": "a", "-0": "b" },
+  ]) {
+    const result = schema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error!.issues[0]).toMatchObject({ code: "invalid_key", origin: "record" });
+  }
+
+  // the error names both input keys and points at the later one in own-keys order
+  const result = schema.safeParse({ "1": "x", "01": "y" });
+  expect(result.error!.issues[0]!.path).toEqual(["01"]);
+  expect(result.error!.issues[0]).toMatchInlineSnapshot(`
+    {
+      "code": "invalid_key",
+      "issues": [
+        {
+          "code": "custom",
+          "message": "Record keys "1" and "01" both map to key 1",
+          "path": [],
+        },
+      ],
+      "message": "Invalid key in record",
+      "origin": "record",
+      "path": [
+        "01",
+      ],
+    }
+  `);
+
+  // key transforms collide the same way
+  const upper = z.record(
+    z.string().overwrite((s) => s.toUpperCase()),
+    z.number()
+  );
+  expect(upper.safeParse({ a: 1, A: 2 }).success).toBe(false);
+
+  // loose mode does not pass a colliding key through either
+  expect(z.looseRecord(z.number(), z.string()).safeParse({ "1": "x", "01": "y" }).success).toBe(false);
+
+  // no false positives: distinct output keys and loose passthrough still work
+  expect(schema.parse({ 1: "x", 2: "y", "1.5": "z" })).toEqual({ 1: "x", 2: "y", "1.5": "z" });
+  expect(z.looseRecord(z.number(), z.string()).parse({ abc: "raw", 1: "x" })).toEqual({ abc: "raw", 1: "x" });
+});
+
 test("v3-compat single-arg form: z.record(valueType)", () => {
   // single arg should default keyType to z.string() and use the arg as valueType
   const schema = (z.record as any)(z.number());
